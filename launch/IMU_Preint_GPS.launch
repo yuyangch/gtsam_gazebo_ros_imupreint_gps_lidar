@@ -1,0 +1,7 @@
+<launch>
+
+    <arg name="project" default="gtsam_ros_package"/>
+    
+    <node pkg="$(arg project)" type="$(arg project)_gps_node"   args="/gazebo_ros_imu /pub2" name="$(arg project)_gps_node"/>
+
+</launch>
