@@ -87,6 +87,8 @@ bool imu2;
 
 long int gps_msg_count=0;
 int correction_count=0;
+
+long int imu_msg_count=0;
 NavState prevStateOdom;
 imuBias::ConstantBias prevBiasOdom;
 
@@ -110,6 +112,9 @@ Values initial_values;
 std::mutex mtx;
 /////////////////////nav states////////////////////
 NavState prop_state;
+
+
+
 po::variables_map parseOptions(int argc, char* argv[]) {
   po::options_description desc;
   desc.add_options()("help,h", "produce help message")(
@@ -139,10 +144,10 @@ boost::shared_ptr<PreintegratedCombinedMeasurements::Params> imuParams() {
   double accel_bias_rw_sigma = 0.004905;
   double gyro_bias_rw_sigma = 0.000001454441043;
   */
-  double accel_noise_sigma = 0.03924;
-  double gyro_noise_sigma = 0.0205689024915;
-  double accel_bias_rw_sigma = 0.04905;
-  double gyro_bias_rw_sigma = 0.0001454441043;
+  double accel_noise_sigma = 0.003924;
+  double gyro_noise_sigma = 2.05689024915;
+  double accel_bias_rw_sigma = 0.4905;
+  double gyro_bias_rw_sigma = 0.1454441043;
   Matrix33 measured_acc_cov = I_3x3 * pow(accel_noise_sigma, 2);
   Matrix33 measured_omega_cov = I_3x3 * pow(gyro_noise_sigma, 2);
   Matrix33 integration_error_cov =
@@ -194,10 +199,61 @@ void odometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
 
 
     gps_msg_count++;
+    cout<<"gps_msg_count"<<gps_msg_count<<endl;
+        // reset graph for speed
+    
+        if (correction_count == 10)
 
-    if (gps_msg_count%100==0){
+
+        {
+          cout<<"graph reset"<<gps_msg_count<<endl;
+            // get updated noise before reset
+            gtsam::noiseModel::Gaussian::shared_ptr updatedPoseNoise = gtsam::noiseModel::Gaussian::Covariance(isam2->marginalCovariance(X(correction_count-1)));
+            gtsam::noiseModel::Gaussian::shared_ptr updatedVelNoise  = gtsam::noiseModel::Gaussian::Covariance(isam2->marginalCovariance(V(correction_count-1)));
+            gtsam::noiseModel::Gaussian::shared_ptr updatedBiasNoise = gtsam::noiseModel::Gaussian::Covariance(isam2->marginalCovariance(B(correction_count-1)));
+            // reset graph
+            //resetOptimization();
 
 
+                gtsam::ISAM2Params optParameters;
+                optParameters.relinearizeThreshold = 0.1;
+                optParameters.relinearizeSkip = 1;
+                delete isam2;
+                isam2 = new ISAM2(optParameters);
+
+                //gtsam::NonlinearFactorGraph newGraphFactors;
+                delete graph;
+                graph = new gtsam::NonlinearFactorGraph;
+
+                gtsam::Values NewGraphValues;
+                //delete initial_values;
+                initial_values = NewGraphValues;
+            // add pose
+            gtsam::PriorFactor<gtsam::Pose3> priorPose(X(0), prevStateOdom.pose(), updatedPoseNoise);
+            graph->add(priorPose);
+            // add velocity
+            gtsam::PriorFactor<gtsam::Vector3> priorVel(V(0), prevStateOdom.v(), updatedVelNoise);
+            graph->add(priorVel);
+            // add bias
+            gtsam::PriorFactor<gtsam::imuBias::ConstantBias> priorBias(B(0), prevBiasOdom, updatedBiasNoise);
+            graph->add(priorBias);
+            // add values
+            initial_values.insert(X(0), prevStateOdom.pose());
+            initial_values.insert(V(0), prevStateOdom.v());
+            initial_values.insert(B(0), prevBiasOdom);
+            // optimize once
+            isam2->update(*graph, initial_values);
+            graph->resize(0);
+            initial_values.clear();
+
+            correction_count = 0;
+        }
+
+
+
+    if (gps_msg_count%40==0){
+
+      cout<<"gps correction"<<gps_msg_count<<endl;
       correction_count++;
 
       // Adding IMU factor and GPS factor and optimizing.
@@ -226,7 +282,7 @@ void odometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
                                   p_z),  // D,
                            correction_noise);
       graph->add(gps_factor);
-
+      cout<<"<1>"<<endl;
       // Now optimize and compare results.
       prop_state = preintegrated->predict(prevStateOdom, prevBiasOdom);
       initial_values.insert(X(correction_count), prop_state.pose());
@@ -261,7 +317,7 @@ void odometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
       // Reset the preintegration object.
       preintegrated->resetIntegrationAndSetBias(prevBiasOdom);
 
-
+      cout<<"<2>"<<endl;
 
 
       // Print out the position and orientation error for comparison.
@@ -287,7 +343,13 @@ void odometryHandler(const nav_msgs::Odometry::ConstPtr& odomMsg)
 void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
 {
 
-
+    imu_msg_count++;
+    if(imu_msg_count%10!=0){
+      return;
+    }
+    static tf::TransformBroadcaster tfMap2Odom;
+    static tf::Transform map_to_odom = tf::Transform(tf::createQuaternionFromRPY(0, 0, 0), tf::Vector3(0, 0, 0));
+    tfMap2Odom.sendTransform(tf::StampedTransform(map_to_odom, imu_raw->header.stamp, "map", "odom"));
 
     std::lock_guard<std::mutex> lock(mtx);
 
@@ -311,13 +373,17 @@ void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
     else
       dt = (lastImuT_imu < 0) ? (1.0 / 50) : (imuTime - lastImuT_imu);
     lastImuT_imu = imuTime;
+    std::cout<<"dt is "<<dt<<std::endl;
+
 
     // integrate this single imu message
     
-    float gravity_adjustment=0;
-    if (imu2==false){gravity_adjustment=9.81;}
+    //float gravity_adjustment=9.80511;
+    float gravity_adjustment=0.0;
+    if (imu2==false){gravity_adjustment=0.0;}
+    cout<<"gravity adjustment is "<<gravity_adjustment<<endl;
     preintegrated->integrateMeasurement(gtsam::Vector3(thisImu.linear_acceleration.x, thisImu.linear_acceleration.y, thisImu.linear_acceleration.z-gravity_adjustment),
-                                            gtsam::Vector3(thisImu.angular_velocity.x,    thisImu.angular_velocity.y,    thisImu.angular_velocity.z), dt);
+                                            gtsam::Vector3(thisImu.angular_velocity.x,   thisImu.angular_velocity.y,   thisImu.angular_velocity.z), dt);
 
     // predict odometry
     gtsam::NavState currentState = preintegrated->predict(prevStateOdom, prevBiasOdom);
@@ -353,11 +419,15 @@ void imuHandler(const sensor_msgs::Imu::ConstPtr& imu_raw)
 
 
 int main(int argc, char* argv[]) {
-  string subtopic=argv[1];
-  string pubtopic=argv[2];
-
+  //string subtopic=argv[1];
+  //string pubtopic=argv[2];
+  string subtopic="/gazebo_ros_imu";
+  string pubtopic="/pub2";
   cout<<"subtopic is "<<subtopic;
   cout<<"pubtopic is "<<pubtopic;
+
+  ROS_INFO("subtopic is %s",subtopic);
+  ROS_INFO("pubtopic is %s",pubtopic);
   if (subtopic.compare("/imu2")==0)
     imu2=true;
   else
@@ -370,9 +440,9 @@ int main(int argc, char* argv[]) {
 
   ros::NodeHandle n;
   //ros::Subscriber sub = n.subscribe(subtopic, 1000, chatterCallback);
-  subImu      = n.subscribe<sensor_msgs::Imu>  (subtopic,                  2000, imuHandler,   ros::TransportHints().tcpNoDelay());
-  pubImuOdometry = n.advertise<nav_msgs::Odometry> (pubtopic, 2000);
-  subOdometry = n.subscribe<nav_msgs::Odometry>("/body_pose_ground_truth", 5,    &odometryHandler, ros::TransportHints().tcpNoDelay());
+  subImu      = n.subscribe<sensor_msgs::Imu>  (subtopic,                  1, imuHandler,   ros::TransportHints().tcpNoDelay());
+  pubImuOdometry = n.advertise<nav_msgs::Odometry> (pubtopic, 1);
+  subOdometry = n.subscribe<nav_msgs::Odometry>("/body_pose_ground_truth", 1,    &odometryHandler, ros::TransportHints().tcpNoDelay());
   //////////////////ROS stuff ends////////
 
    //////////////initialization//////////////////////////////////////////////////////////////////////
@@ -385,6 +455,8 @@ int main(int argc, char* argv[]) {
   //data_filename = findExampleDataFile(var_map["data_csv_path"].as<string>());
   //output_filename = var_map["output_filename"].as<string>();
   use_isam = var_map["use_isam"].as<bool>();
+  use_isam=true;
+
 
 
   if (use_isam) {
@@ -413,6 +485,9 @@ int main(int argc, char* argv[]) {
   // Format is (N,E,D,qX,qY,qZ,qW,velN,velE,velD)
   Vector10 initial_state;
 
+
+
+  printf("<0>\n");
   //getline(file, value, ',');  // i
   for (int i = 0; i < 9; i++) {
     initial_state(i) = 0.0;
@@ -426,6 +501,7 @@ int main(int argc, char* argv[]) {
   // ::quaternion(w,x,y,z);
   Rot3 prior_rotation = Rot3::Quaternion(initial_state(6), initial_state(3),
                                          initial_state(4), initial_state(5));
+  printf("<0.25>\n");
   Point3 prior_point(initial_state.head<3>());
   Pose3 prior_pose(prior_rotation, prior_point);
   Vector3 prior_velocity(initial_state.tail<3>());
@@ -439,6 +515,7 @@ int main(int argc, char* argv[]) {
   initial_values.insert(B(correction_count), prior_imu_bias);
   // Assemble prior noise model and add it the graph.`
 
+  printf("<0.5>\n");
 
   // Add all prior factors (pose, velocity, bias) to the graph.
   
@@ -453,6 +530,8 @@ int main(int argc, char* argv[]) {
 
   assert(preintegrated);
 
+
+  printf("<1>\n");
   // Store previous state for imu integration and latest predicted outcome.
   NavState prev_state(prior_pose, prior_velocity);
   prop_state = prev_state;
@@ -467,7 +546,7 @@ int main(int argc, char* argv[]) {
                       // exactly the same, so keeping this for simplicity.
 
 
-
+  printf("<2>\n");
 
 /*
   //////////////////////////////////Loop Startuing/////////////////////////////////////////////

@@ -2,6 +2,6 @@
 
     <arg name="project" default="gtsam_ros_package"/>
     
-    <node pkg="$(arg project)" type="$(arg project)_gps_node"   args="/gazebo_ros_imu /pub2" name="$(arg project)_gps_node"/>
+    <node pkg="$(arg project)" type="$(arg project)_gps_node"   args="/mavros/imu/data_raw /pub2" name="$(arg project)_gps_node"/>
 
 </launch>
